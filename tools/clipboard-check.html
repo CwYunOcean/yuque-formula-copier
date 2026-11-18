@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>语雀公式剪贴板检查</title>
+<style>
+body{max-width:760px;margin:40px auto;padding:0 20px;font:16px/1.7 system-ui,sans-serif;color:#202124}
+h1{font-size:24px}textarea{box-sizing:border-box;width:100%;padding:12px;font:15px/1.5 monospace;border:1px solid #aaa;border-radius:6px}
+#input{height:90px}#report{height:340px}label{display:block;margin-top:24px;font-weight:600}
+</style>
+<h1>检查公式复制格式</h1>
+<p>重新复制知乎中的这段内容，在下面按 Ctrl+V，再把生成的报告发回。报告只包含格式和计数。</p>
+<label for="input">在这里粘贴知乎内容</label>
+<textarea id="input" autofocus placeholder="点这里，然后按 Ctrl+V"></textarea>
+<label for="report">检查报告</label>
+<textarea id="report" readonly placeholder="粘贴后自动生成"></textarea>
+<script>
+function summarizeClipboard(clipboard) {
+    const plain = clipboard.getData('text/plain');
+    const html = clipboard.getData('text/html');
+    const lake = clipboard.getData('text/lake');
+    function centeredBlocks(text) {
+        const styles = text.match(/<(?:p|div)\b[^>]*\bstyle="[^"]*"[^>]*>/g) || [];
+        return styles.filter(tag => /\btext-align\s*:\s*center\b/i.test(tag)).length;
+    }
+    return {
+        formats: Array.from(clipboard.types),
+        plain: { characters: plain.length, formulaOnlyLines: (plain.match(/^\s*\$[^\n]+\$\s*$/gm) || []).length },
+        html: { characters: html.length, formulas: (html.match(/\bdata-type="math"/g) || []).length, centeredBlocks: centeredBlocks(html) },
+        lake: { characters: lake.length, formulas: (lake.match(/\bname="math"/g) || []).length, centeredBlocks: centeredBlocks(lake) },
+    };
+}
+document.getElementById('input').addEventListener('paste', event => {
+    event.preventDefault();
+    document.getElementById('report').value = JSON.stringify(summarizeClipboard(event.clipboardData), null, 2);
+    event.target.value = '报告已生成，请复制下方报告。';
+});
+</script>
+</html>
