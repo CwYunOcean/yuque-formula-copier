@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         FormulaCopier
 // @namespace    http://tampermonkey.net/
-// @version      0.7.0
-// @description  复制网页公式的 LaTeX，粘贴到语雀时生成可编辑公式，独立公式自动居中。
+// @version      0.8.1
+// @description  粘贴到语雀时保留标题、加粗和列表，独立公式自动居中。
 // @author       Yuhang Chen, Dramwig; Yuque adaptation: CwYunOcean
 // @license      MIT
 // @homepageURL  https://github.com/CwYunOcean/yuque-formula-copier
@@ -229,59 +229,136 @@ SOFTWARE.
     function replaceFormula(formula, texCode) {
         const span = document.createElement('span');
         span.setAttribute('data-formula-copier', texCode);
+        if (formula.nodeName === 'DIV' || formula.style?.display === 'block' ||
+            /^(true|block)$/.test(formula.getAttribute('display')) ||
+            formula.parentElement?.classList.contains('katex-display')) {
+            span.setAttribute('data-formula-display', '');
+        }
         span.textContent = '$' + texCode + '$';
         formula.replaceWith(span);
     }
 
-    function setClipboardData(event, container) {
-        const html = [document.createElement('div')];
-        const lake = [document.createElement('p')];
+    function collectBlocks(container) {
+        const blocks = [];
+        let parts = [];
 
-        function appendContent(node) {
-            if (node.nodeType === Node.TEXT_NODE) {
-                node.textContent.split('\n').forEach((line, index) => {
-                    if (index) {
-                        html.push(document.createElement('div'));
-                        lake.push(document.createElement('p'));
-                    }
-                    html.at(-1).appendChild(document.createTextNode(line));
-                    lake.at(-1).appendChild(document.createTextNode(line));
-                });
-            } else if (node.nodeType === Node.ELEMENT_NODE && node.hasAttribute('data-formula-copier')) {
-                const code = node.getAttribute('data-formula-copier');
-                const math = document.createElement('div');
-                math.setAttribute('data-type', 'math');
-                math.setAttribute('data-text', code);
-                math.setAttribute('style', 'display: inline');
-                math.textContent = node.textContent;
-                html.at(-1).appendChild(math);
-
-                const card = document.createElement('card');
-                card.setAttribute('type', 'inline');
-                card.setAttribute('name', 'math');
-                card.setAttribute('value', 'data:' + encodeURIComponent(JSON.stringify({ code })));
-                lake.at(-1).appendChild(card);
-            } else {
-                node.childNodes.forEach(appendContent);
-            }
+        function endBlock(block) {
+            if (parts.some(part => part.text.trim())) blocks.push({ ...block, parts });
+            parts = [];
         }
 
-        // Emit only text and formula nodes; never forward website HTML or event attributes.
-        appendContent(container);
-        html.forEach((line, index) => {
-            const content = Array.from(line.childNodes).filter(node => node.textContent.trim());
-            if (content.length === 1 && content[0].nodeType === Node.ELEMENT_NODE) {
-                line.setAttribute('style', 'text-align: center');
-                lake[index].setAttribute('style', 'text-align: center');
-            } else if (!content.length) {
-                line.appendChild(document.createElement('br'));
-                lake[index].appendChild(document.createElement('br'));
+        function walk(node, block, bold) {
+            if (node.nodeType === Node.TEXT_NODE) {
+                node.textContent.split('\n').forEach((text, index) => {
+                    if (index) endBlock(block);
+                    if (text) parts.push({ text, bold });
+                });
+                return;
             }
-        });
+            if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+            if (node.hasAttribute('data-formula-copier')) {
+                const formula = { text: node.textContent, code: node.getAttribute('data-formula-copier') };
+                if (node.hasAttribute('data-formula-display')) {
+                    endBlock(block);
+                    blocks.push({ tag: 'p', parts: [formula] });
+                } else {
+                    parts.push(formula);
+                }
+                return;
+            }
+
+            const tag = node.nodeName.toLowerCase();
+            if (tag === 'br') {
+                endBlock(block);
+                return;
+            }
+
+            const heading = /^h[1-6]$/.test(tag);
+            const boundary = heading || ['p', 'div', 'section', 'figure', 'ul', 'ol', 'li'].includes(tag);
+            if (boundary) endBlock(block);
+            const next = tag === 'ul' || tag === 'ol' ? { tag: 'p', list: node, listTag: tag } :
+                tag === 'li' && !block.list ? { tag: 'p', list: node, listTag: 'ul' } :
+                    heading ? { ...block, tag } : block;
+            const weight = node.style?.fontWeight;
+            node.childNodes.forEach(child => walk(child, next,
+                bold || tag === 'strong' || tag === 'b' || weight === 'bold' || Number(weight) >= 600));
+            if (boundary) endBlock(next);
+        }
+
+        const paragraph = { tag: 'p' };
+        container.childNodes.forEach(node => walk(node, paragraph, false));
+        endBlock(paragraph);
+        return blocks;
+    }
+
+    function serializeBlocks(blocks, lake) {
+        const root = document.createElement('div');
+        let list = null;
+        let listKey = null;
+        let listId = 0;
+        for (const { tag, parts, list: sourceList, listTag } of blocks) {
+            const content = parts.filter(part => part.text.trim());
+            const first = content[0];
+            const bullet = tag === 'p' && first.code === undefined && /^\s*[·•]/.test(first.text);
+            const key = sourceList || (bullet ? 'bullet' : null);
+            if (!key) list = null;
+            else if (!list || key !== listKey) {
+                list = document.createElement(listTag || 'ul');
+                // Lake requires a list ID even for a single bullet.
+                if (lake) list.setAttribute('list', 'formula-copier-' + ++listId);
+                const start = sourceList?.getAttribute('start');
+                if (listTag === 'ol' && start && /^\d+$/.test(start)) list.setAttribute('start', start);
+                root.appendChild(list);
+            }
+            listKey = key;
+
+            const centered = !list && tag === 'p' && content.length === 1 && first.code !== undefined;
+            const adjacentEquations = !list && tag === 'p' && content.length > 1 &&
+                content.every(part => part.code !== undefined) && parts.length === content.length;
+
+            for (const standalonePart of adjacentEquations ? content : [null]) {
+                const element = document.createElement(list ? 'li' : !lake && tag === 'p' ? 'div' : tag);
+                if (centered || adjacentEquations) element.setAttribute('style', 'text-align: center');
+                else if (!list && tag === 'p' && content.some(part => !part.bold)) {
+                    element.setAttribute('style', 'text-indent: 2em');
+                }
+
+                for (const part of standalonePart ? [standalonePart] : centered ? content : parts) {
+                    if (part.code !== undefined) {
+                        const formula = document.createElement(lake ? 'card' : 'div');
+                        if (lake) {
+                            formula.setAttribute('type', 'inline');
+                            formula.setAttribute('name', 'math');
+                            formula.setAttribute('value', 'data:' + encodeURIComponent(JSON.stringify({ code: part.code })));
+                        } else {
+                            formula.setAttribute('data-type', 'math');
+                            formula.setAttribute('data-text', part.code);
+                            formula.setAttribute('style', 'display: inline');
+                            formula.textContent = part.text;
+                        }
+                        element.appendChild(formula);
+                    } else {
+                        const text = bullet && part === first ? part.text.replace(/^\s*[·•][ \t\u00a0\u3000]*/, '') : part.text;
+                        if (!text) continue;
+                        const parent = part.bold ? element.appendChild(document.createElement('strong')) : element;
+                        parent.appendChild(document.createTextNode(text));
+                    }
+                }
+                (list || root).appendChild(element);
+            }
+        }
+        return root.innerHTML;
+    }
+
+    function setClipboardData(event, container) {
+        // Build our own markup; never forward source HTML or its attributes.
+        const blocks = collectBlocks(container);
+        convertLineBreaks(container);
         event.clipboardData.setData('text/plain', container.textContent);
-        event.clipboardData.setData('text/html', html.map(line => line.outerHTML).join(''));
-        // shortcut: Yuque's current clipboard formats, update these markers if its editor changes.
-        event.clipboardData.setData('text/lake', lake.map(line => line.outerHTML).join(''));
+        event.clipboardData.setData('text/html', serializeBlocks(blocks, false));
+        // shortcut: Yuque's current clipboard formats, update the markers if its editor changes.
+        event.clipboardData.setData('text/lake', serializeBlocks(blocks, true));
         event.preventDefault();
     }
 
@@ -307,8 +384,6 @@ SOFTWARE.
                 container.appendChild(sel.getRangeAt(i).cloneContents());
             }
 
-            // Keep newline
-            convertLineBreaks(container);
             return container.innerHTML;
         }
         return '';

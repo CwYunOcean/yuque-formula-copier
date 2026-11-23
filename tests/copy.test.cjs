@@ -35,10 +35,11 @@ class Element {
     }
     get textContent() { return this.childNodes.map(node => node.textContent).join(''); }
     set textContent(text) { this.childNodes = []; this.appendChild(new Text(text)); }
+    get innerHTML() { return this.childNodes.map(node => node.outerHTML).join(''); }
     get outerHTML() {
         const attrs = Object.entries(this.attrs).map(([key, value]) => ` ${key}="${escapeAttribute(value)}"`).join('');
         const open = `<${this.name}${attrs}>`;
-        return this.name === 'br' ? open : open + this.childNodes.map(node => node.outerHTML).join('') + `</${this.name}>`;
+        return this.name === 'br' ? open : open + this.innerHTML + `</${this.name}>`;
     }
     querySelectorAll(selector) {
         const matches = node => selector.startsWith('.')
@@ -114,8 +115,8 @@ for (const [replace, name, className, annotation] of [
     assert.equal(formats['text/plain'], `Sigmoid：$${tex}$\n优点：输出在(0,1)\n\nTanh。`);
     assert.ok(formats['text/html'].includes('<div data-type="math"'));
     assert.ok(formats['text/html'].includes(`data-text="${escapeAttribute(tex)}"`));
-    assert.equal((formats['text/html'].match(/<div(?:>| style=)/g) ?? []).length, 4);
-    assert.equal((formats['text/html'].match(/<br>/g) ?? []).length, 1);
+    assert.equal((formats['text/html'].match(/<div style="text-indent: 2em">/g) ?? []).length, 3);
+    assert.ok(!formats['text/html'].includes('<br>'));
     assert.ok(!formats['text/html'].includes('text-align: center'));
     const value = formats['text/lake'].match(/<card type="inline" name="math" value="([^"]+)"><\/card>/)[1];
     assert.equal(JSON.parse(decodeURIComponent(value.slice(5))).code, tex);
@@ -157,7 +158,7 @@ assert.equal(advantageFormats['text/plain'], `优势记为 $A_i$。目标函数�
 for (const type of ['text/html', 'text/lake']) {
     assert.equal((advantageFormats[type].match(/text-align: center/g) ?? []).length, 1);
 }
-assert.ok(advantageFormats['text/html'].includes(`<div style="text-align: center"> \t<div data-type="math" data-text="${escapeAttribute(loss)}"`));
+assert.ok(advantageFormats['text/html'].includes(`<div style="text-align: center"><div data-type="math" data-text="${escapeAttribute(loss)}"`));
 const centeredLake = advantageFormats['text/lake'].match(/<p style="text-align: center">([\s\S]*?)<\/p>/)[1];
 const lossValue = centeredLake.match(/value="([^"]+)"/)[1];
 assert.equal(JSON.parse(decodeURIComponent(lossValue.slice(5))).code, loss);
@@ -176,9 +177,9 @@ firstParagraph.appendChild(new Element('br'));
 addFormula(firstParagraph, loss);
 const secondParagraph = paragraphRoot.appendChild(new Element('p'));
 secondParagraph.appendChild(new Text('解释。'));
-api.convertLineBreaks(paragraphRoot);
-assert.equal(paragraphRoot.textContent, `目标：\n$${loss}$\n\n解释。`);
-assert.equal((capture(paragraphRoot)['text/lake'].match(/text-align: center/g) ?? []).length, 1);
+const paragraphFormats = capture(paragraphRoot);
+assert.equal(paragraphFormats['text/plain'], `目标：\n$${loss}$\n\n解释。`);
+assert.equal((paragraphFormats['text/lake'].match(/text-align: center/g) ?? []).length, 1);
 
 listeners.copy({ preventDefault: () => assert.fail('Empty selections must retain browser copy behavior') });
 const inspector = fs.readFileSync(path.join(__dirname, '..', 'tools', 'clipboard-check.html'), 'utf8');
@@ -217,4 +218,58 @@ assert.equal(multiReport.html.formulas, 6);
 assert.equal(multiReport.lake.formulas, 6);
 assert.equal(multiReport.html.centeredBlocks, 4);
 assert.equal(multiReport.lake.centeredBlocks, 4);
-console.log('PASS: four extractors, LaTeX preservation, editable formula formats, standalone centering, inline formulas, line breaks, clipboard report.');
+
+const article = new Element('div');
+article.appendChild(new Element('h2')).textContent = '改进探索机制';
+const body = article.appendChild(new Element('p'));
+body.appendChild(new Text('使用贪心策略，并保留'));
+body.appendChild(new Element('b')).textContent = '重点';
+body.appendChild(new Text('。'));
+const item = article.appendChild(new Element('ul')).appendChild(new Element('li'));
+item.appendChild(new Text('以 '));
+addFormula(item, String.raw`\epsilon`);
+item.appendChild(new Text(' 的概率探索。'));
+const equation = String.raw`a=\begin{cases}x&\text{if }y\\z&\text{otherwise}\end{cases}`;
+const display = article.appendChild(new Element('div'));
+display.setAttribute('class', 'ztext-math');
+display.setAttribute('data-tex', equation);
+article.appendChild(new Text('\n\n'));
+article.appendChild(new Element('h3')).textContent = '经验回放';
+article.appendChild(new Element('p')).textContent = '· 保存经验';
+article.appendChild(new Element('p')).textContent = '• 抽样训练';
+article.appendChild(new Element('p')).textContent = '此处的间隔号 A·B 不变。';
+api.replaceZhihuFormulas(article);
+const rich = capture(article);
+for (const type of ['text/html', 'text/lake']) {
+    const markup = rich[type];
+    assert.match(markup, /^<h2>改进探索机制<\/h2><(?:p|div) style="text-indent: 2em">使用贪心策略，并保留<strong>重点<\/strong>。/);
+    assert.match(markup, /<ul(?: list="[^"]+")?><li>以 .* 的概率探索。<\/li><\/ul><(?:p|div) style="text-align: center">/);
+    assert.match(markup, /<h3>经验回放<\/h3><ul(?: list="[^"]+")?><li>保存经验<\/li><li>抽样训练<\/li><\/ul>/);
+    assert.equal((markup.match(/text-indent: 2em/g) ?? []).length, 2);
+    assert.equal((markup.match(/text-align: center/g) ?? []).length, 1);
+    assert.ok(markup.includes('A·B'));
+    assert.ok(!markup.includes('<br>'));
+}
+assert.match(rich['text/lake'], /<\/card><\/p><h3>经验回放/);
+const cards = [...rich['text/lake'].matchAll(/value="data:([^"]+)"/g)];
+assert.deepEqual(cards.map(card => JSON.parse(decodeURIComponent(card[1])).code), [String.raw`\epsilon`, equation]);
+assert.ok(rich['text/plain'].includes('$' + equation + '$'));
+assert.ok(rich['text/plain'].includes('· 保存经验'));
+
+const adjacentFormulaParagraph = new Element('p');
+addFormula(adjacentFormulaParagraph, String.raw`V^\pi(s)=\mathbb{E}(Q^\pi(s,a))`);
+addFormula(adjacentFormulaParagraph, String.raw`Q^\pi(s_t,a_t)=r_t+V^\pi(s_{t+1})`);
+const adjacentFormats = capture(adjacentFormulaParagraph);
+for (const type of ['text/html', 'text/lake']) {
+    const markup = adjacentFormats[type];
+    assert.equal((markup.match(/text-align: center/g) ?? []).length, 2);
+    assert.equal((markup.match(/name="math"/g) ?? []).length, type === 'text/lake' ? 2 : 0);
+    const paragraphTag = type === 'text/lake' ? 'p' : 'div';
+    assert.equal((markup.match(new RegExp(`<${paragraphTag} style="text-align: center">`, 'g')) ?? []).length, 2);
+    assert.ok(!markup.includes('<br>'));
+    assert.ok(!markup.includes('<p><br>'));
+}
+assert.deepEqual([...adjacentFormats['text/lake'].matchAll(/value="data:([^\"]+)"/g)]
+    .map(match => JSON.parse(decodeURIComponent(match[1])).code),
+['V^\\pi(s)=\\mathbb{E}(Q^\\pi(s,a))', 'Q^\\pi(s_t,a_t)=r_t+V^\\pi(s_{t+1})']);
+console.log('PASS: formula extraction and encoding, headings, bold, first-line indent, native lists, and adjacent standalone equations.');
